@@ -21,7 +21,14 @@ func main() {
 	hub := controllers.NewHub(ctx)
 	router := routes.SetupRouter(hub)
 
-	srv := &http.Server{Addr: ":8080", Handler: router}
+	backendPort := os.Getenv("BACKEND_PORT")
+	if backendPort == "" {
+		backendPort = "8080" // Default port if not set in .env
+	}
+
+	backendAddr := ":" + backendPort
+	// Create and start the server with graceful shutdown
+	srv := &http.Server{Addr: backendAddr, Handler: router}
 
 	go func() {
 		<-ctx.Done()

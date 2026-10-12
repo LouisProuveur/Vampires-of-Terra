@@ -2,6 +2,8 @@
 package controllers
 
 import (
+	"Vampires-of-Terra/errors"
+	"Vampires-of-Terra/models"
 	"context"
 	"net/http"
 	"sync"
@@ -10,11 +12,6 @@ import (
 )
 
 const charBytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
-
-type NewGameRequest struct {
-	ID       string `json:"id"`
-	Password string `json:"password"`
-}
 
 /*
 Hub manages all game controllers and lifecycles of games.
@@ -38,12 +35,14 @@ func NewHub(ctx context.Context) *Hub {
 
 /*
 Creates a new game managed by the Hub.
-It expects a JSON payload with the game ID and password for the game.
-If the ID is unique, a GameController instance is created and the associated gorouting is started.
+It expects a JSON payload with the game ID and password for the game as well as the player's name.
+If the game ID is unique, a GameController instance is created and the associated goroutine is started.
+If the player's name is unique, the player is added to the game.
+On success, returns the player's token
 */
 func (hub *Hub) CreateGame(c *gin.Context) {
 
-	var req NewGameRequest
+	var req models.GameRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -68,5 +67,51 @@ func (hub *Hub) CreateGame(c *gin.Context) {
 
 	go gameController.Run(gameCtx)
 
-	c.JSON(http.StatusCreated, gin.H{"message": "Game created", "game_id": req.ID})
+	token, err := gameController.JoinGame(req.PlayerName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "Game created", "token": token})
+}
+
+/*
+Used to add a player to a game.
+It expects a JSON payload with the game ID and password for the game as well as the player's name.
+If the player's ID is unique and the password correct, the player is added to the game.
+On success, returns the player's token
+*/
+func (hub *Hub) JoinGame(c *gin.Context) {
+
+	var req models.GameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	hub.mutex.RLock()
+	defer hub.mutex.RUnlock()
+
+	gameController, exists := hub.games[req.ID]
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Game not found"})
+		return
+	}
+
+	passwordValid := gameController.VerifyPassword(req.Password)
+	if !passwordValid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
+		return
+	}
+
+	token, err := gameController.JoinGame(req.PlayerName)
+	if err == errors.ErrPlayerNameTaken {
+		c.JSON(http.StatusConflict, gin.H{"error": "Name Already Taken"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Joined game", "token": token})
+
 }

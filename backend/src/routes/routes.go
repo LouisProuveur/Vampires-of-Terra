@@ -11,6 +11,7 @@ func SetupRouter(hub *controllers.Hub) *gin.Engine {
 
 	router := gin.Default()
 	router.POST("/new", hub.CreateGame)
+	router.POST("/join", hub.JoinGame)
 
 	return router
 
