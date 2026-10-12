@@ -70,6 +70,7 @@ func (hub *Hub) CreateGame(c *gin.Context) {
 	token, err := gameController.JoinGame(req.PlayerName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "Game created", "token": token})
@@ -110,8 +111,23 @@ func (hub *Hub) JoinGame(c *gin.Context) {
 		return
 	} else if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Joined game", "token": token})
+
+}
+
+func (hub *Hub) Connect(c *gin.Context) {
+
+	gameID := c.Param("id")
+
+	gameController, exists := hub.games[gameID]
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Game ID not found"})
+		return
+	}
+
+	gameController.Connect(c)
 
 }
