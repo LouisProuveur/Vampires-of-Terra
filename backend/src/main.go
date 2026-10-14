@@ -2,9 +2,11 @@ package main
 
 import (
 	"Vampires-of-Terra/controllers"
+	"Vampires-of-Terra/models"
 	"Vampires-of-Terra/routes"
 	"context"
-	"log"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,32 +14,75 @@ import (
 	"time"
 )
 
+func initLogging() {
+	level := slog.LevelInfo
+
+	switch lvlstr := os.Getenv("LOG_LEVEL"); lvlstr {
+	case "error":
+		level = slog.LevelError
+	case "warn":
+		level = slog.LevelWarn
+	case "info":
+		level = slog.LevelInfo
+	case "debug":
+		level = slog.LevelDebug
+	default:
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: level,
+	})))
+}
+
 func main() {
+
+	initLogging()
 
 	// Create context to stop goroutines when stopping the server
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	hub := controllers.NewHub(ctx)
+	hub := controllers.NewHub(ctx, os.Getenv("FRONTEND_URL"))
+
+	if err := models.RegisterValidators(); err != nil {
+		slog.Error("validator loading failed", "error", err)
+		os.Exit(1)
+	}
+
 	router := routes.SetupRouter(hub)
 
 	backendPort := os.Getenv("BACKEND_PORT")
 	if backendPort == "" {
-		backendPort = "8080" // Default port if not set in .env
+		backendPort = "8080" // Default port if not set in env
 	}
 
 	backendAddr := ":" + backendPort
 	// Create and start the server with graceful shutdown
 	srv := &http.Server{Addr: backendAddr, Handler: router}
+	srv.ReadHeaderTimeout = 5 * time.Second
+	srv.ReadTimeout = 10 * time.Second
+	srv.IdleTimeout = 60 * time.Second
+
+	done := make(chan struct{})
 
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("error when stopping server", "error", err)
+		}
+		close(done)
+		slog.Info("server stopped")
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	slog.Info("server started", "port", backendPort)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("error while starting server", "error", err)
+		os.Exit(1)
 	}
+	<-done
 }
+
+// TODO: better validator messages, rather than dump err.Error()
+// TODO: use env variables when possible rather const when necessary

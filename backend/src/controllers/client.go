@@ -1,7 +1,10 @@
+// src/controllers/client.go
 package controllers
 
 import (
 	"Vampires-of-Terra/models"
+	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,14 +30,11 @@ func NewClient(id string, gc *GameController, conn *websocket.Conn) *Client {
 		playerID: id,
 		game:     gc,
 		conn:     conn,
-		send:     make(chan []byte),
+		send:     make(chan []byte, sendBufferSize),
 	}
 }
 
-func (c *Client) getName() string {
-	return c.playerID
-}
-
+// TODO: event rate limiter
 func (c *Client) readPump() {
 	defer func() {
 		c.game.Unregister(c)
@@ -49,11 +49,19 @@ func (c *Client) readPump() {
 	})
 
 	for {
-		var event models.Event
-		if err := c.conn.ReadJSON(&event); err != nil {
+		_, message, err := c.conn.ReadMessage()
+		if err != nil {
+			slog.Debug("error when reading client message", "player_id", c.playerID, "game_id", c.game.id, "error", err)
 			return
 		}
-		c.game.QueueEvent(event)
+		var event models.IncomingEvent
+		if err := json.Unmarshal(message, &event); err != nil {
+			slog.Debug("error when parsing incoming event", "player_id", c.playerID, "game_id", c.game.id, "error", err)
+			// TODO: send error event to client
+			continue
+		}
+
+		c.game.QueueEvent(event, c.playerID)
 	}
 }
 
@@ -69,7 +77,11 @@ func (c *Client) writePump() {
 		case msg, ok := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.conn.WriteControl(
+					websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseGoingAway, ""),
+					time.Now().Add(time.Second),
+				)
 				return
 			}
 

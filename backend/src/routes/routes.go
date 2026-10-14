@@ -7,6 +7,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// TODO: rate limit on /new and /join to prevent DoS
+// TODO: size limit on /new and /join as well
+// TODO: token will be visible in the query string. Change it
+// TODO: set trusted proxies (currently trusting all proxies)
 func SetupRouter(hub *controllers.Hub) *gin.Engine {
 
 	router := gin.Default()

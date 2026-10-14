@@ -1,10 +1,13 @@
-// src/controller/game.go
+// src/controllers/game.go
 package controllers
 
 import (
+	"Vampires-of-Terra/apperrors"
 	"Vampires-of-Terra/models"
 	"context"
-	"net/http"
+	"crypto/rand"
+	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,27 +16,30 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// TODO: change origin checker
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
+const (
+	GameIdleTimeout = 5 * time.Minute
+	GracePeriod     = 30 * time.Second
+)
 
-type PlayerClaims struct {
+type playerClaims struct {
 	PlayerName string `json:"pid"`
 	GameID     string `json:"gid"`
 	jwt.RegisteredClaims
 }
 
+type playerJoinRequest struct {
+	playerName string
+	result     chan error
+}
+
 type GameController struct {
 	game           *models.Game
 	id             string
-	password_hash  []byte
+	passwordHash   []byte
+	secret         []byte
 	cancel         context.CancelFunc
 	clients        map[string]*Client // maps player IDs to clients
+	playerJoin     chan *playerJoinRequest
 	incomingEvents chan models.Event
 	register       chan *Client
 	unregister     chan *Client
@@ -44,22 +50,23 @@ type GameController struct {
 Creates a new gamecontroller instance with password and id
 Returns the gamecontroller instance
 */
-func CreateGameController(id string, password string, cancel context.CancelFunc) (*GameController, error) {
+func CreateGameController(id string, passwordHash []byte, maxPlayers int, cancel context.CancelFunc) (*GameController, error) {
 
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
+	game := models.NewGame(maxPlayers)
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
 		return nil, err
 	}
-
-	game := models.NewGame()
 
 	return &GameController{
 		game:           game,
 		id:             id,
-		password_hash:  passwordHash,
+		passwordHash:   passwordHash,
+		secret:         secret,
 		cancel:         cancel,
 		clients:        make(map[string]*Client),
 		incomingEvents: make(chan models.Event),
+		playerJoin:     make(chan *playerJoinRequest),
 		register:       make(chan *Client),
 		unregister:     make(chan *Client),
 		done:           make(chan struct{}),
@@ -67,10 +74,17 @@ func CreateGameController(id string, password string, cancel context.CancelFunc)
 }
 
 /*
+Hashes a password in a way that is expected by the game controller.
+*/
+func HashPassword(password string) ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+}
+
+/*
 Verifies the provided password against the stored hash
 */
 func (gc *GameController) VerifyPassword(password string) bool {
-	err := bcrypt.CompareHashAndPassword(gc.password_hash, []byte(password))
+	err := bcrypt.CompareHashAndPassword(gc.passwordHash, []byte(password))
 	return err == nil
 }
 
@@ -79,7 +93,7 @@ Produces a JWT holding the player's name and associated game ID.
 These tokens are only valid for the game they were created for.
 */
 func (gc *GameController) signToken(playerName string) (string, error) {
-	claims := PlayerClaims{
+	claims := playerClaims{
 		PlayerName: playerName,
 		GameID:     gc.id,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -88,7 +102,7 @@ func (gc *GameController) signToken(playerName string) (string, error) {
 		},
 	}
 
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString("hello there")
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(gc.secret)
 }
 
 /*
@@ -97,12 +111,12 @@ A token is only valid for the given game instance they were produced for.
 Returns the player ID
 */
 func (gc *GameController) parseToken(tokenStr string) (string, error) {
-	claims := &PlayerClaims{}
+	claims := &playerClaims{}
 
 	token, err := jwt.ParseWithClaims(
 		tokenStr,
 		claims,
-		func(t *jwt.Token) (any, error) { return "hello there", nil },
+		func(t *jwt.Token) (any, error) { return gc.secret, nil },
 		jwt.WithValidMethods([]string{"HS256"}),
 	)
 	if err != nil {
@@ -122,41 +136,77 @@ Returns the player's token
 */
 func (gc *GameController) JoinGame(playerName string) (string, error) {
 
-	if err := gc.game.AddPlayer(playerName); err != nil {
-		return "", err
-	}
-
 	token, err := gc.signToken(playerName)
 	if err != nil {
 		return "", err
+	}
+
+	req := &playerJoinRequest{
+		playerName: playerName,
+		result:     make(chan error, 1),
+	}
+
+	select {
+	case gc.playerJoin <- req:
+	case <-gc.done:
+		return "", apperrors.ErrGameClosed
+	}
+
+	select {
+	case err := <-req.result:
+		if err != nil {
+			return "", err
+		}
+	case <-gc.done:
+		return "", apperrors.ErrGameClosed
 	}
 
 	return token, nil
 
 }
 
-func (gc *GameController) Connect(c *gin.Context) {
-
-	id, err := gc.parseToken(c.Query("token"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+func (gc *GameController) Connect(c *gin.Context, upgrader *websocket.Upgrader) {
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		slog.Error("websocker error failed", "game_id", gc.id, "error", err)
+		return
+	}
+
+	// Wait 5 secs for client to send auth message
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadLimit(512)
+	_, message, err := conn.ReadMessage()
+	if err != nil {
+		slog.Warn("client authenication failed", "ip", conn.RemoteAddr(), "error", err)
+		conn.Close()
+		return
+	}
+
+	id, err := gc.parseToken(string(message))
+	if err != nil {
+		slog.Warn("invalid token was used", "ip", c.ClientIP())
+		conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "unauthorized access"),
+			time.Now().Add(time.Second),
+		)
+		conn.Close()
 		return
 	}
 
 	client := NewClient(id, gc, conn)
-	gc.Register(client, c.Query("token"))
+	gc.Register(client)
 
 }
 
-func (gc *GameController) Register(client *Client, token string) {
+func (gc *GameController) Register(client *Client) {
 	select {
 	case gc.register <- client:
+		go client.readPump()
+		go client.writePump()
 	case <-gc.done:
+		client.conn.Close()
 	}
 }
 
@@ -167,14 +217,20 @@ func (gc *GameController) Unregister(client *Client) {
 	}
 }
 
-func (gc *GameController) QueueEvent(ev models.Event) {
+func (gc *GameController) QueueEvent(ev models.IncomingEvent, playerName string) {
 	select {
-	case gc.incomingEvents <- ev:
+	case gc.incomingEvents <- *ev.ToEvent(playerName):
 	case <-gc.done:
 	}
 }
 
-func (gc *GameController) Run(ctx context.Context) {
+func (gc *GameController) Run(ctx context.Context, callback func(string, *GameController)) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("event loop crashed", "type", "game_loop_crash", "game_id", gc.id, "panic", r, "stack", debug.Stack())
+		}
+	}()
+	defer callback(gc.id, gc)
 	defer close(gc.done)
 	defer func() {
 		for id, c := range gc.clients {
@@ -182,27 +238,53 @@ func (gc *GameController) Run(ctx context.Context) {
 			delete(gc.clients, id)
 		}
 	}()
+	defer gc.cancel()
 
+	// TODO: implement resync
+	timer := time.NewTimer(GameIdleTimeout)
+	grace := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case p := <-gc.playerJoin:
+			p.result <- gc.game.AddPlayer(p.playerName)
 		case c := <-gc.register:
 			if old, exists := gc.clients[c.playerID]; exists {
 				close(old.send)
 			}
 			gc.clients[c.playerID] = c
+			if player := gc.game.GetPlayer(c.playerID); player != nil {
+				player.Connected = true
+			}
 		case c := <-gc.unregister:
 			if gc.clients[c.playerID] == c {
 				delete(gc.clients, c.playerID)
 				close(c.send)
+				if player := gc.game.GetPlayer(c.playerID); player != nil {
+					player.Connected = false
+				}
 			}
+			continue // Leaving does not reset grace or timer
 		case e := <-gc.incomingEvents:
 			gc.HandleEvent(e)
+
+		// If noone is connected or grace period is over, return. Else, warn clients and enter grace period
+		case <-timer.C:
+			if grace || len(gc.clients) == 0 {
+				return
+			} else {
+				grace = true
+				timer.Reset(GracePeriod)
+				// warn clients that game is about to close
+				continue
+			}
 		}
+		timer.Reset(GameIdleTimeout)
+		grace = false
 	}
 }
 
 func (gc *GameController) HandleEvent(event models.Event) {
-
+	// TODO: validate events and pass them to the game state machine
 }

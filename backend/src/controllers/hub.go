@@ -2,34 +2,57 @@
 package controllers
 
 import (
-	"Vampires-of-Terra/errors"
+	"Vampires-of-Terra/apperrors"
 	"Vampires-of-Terra/models"
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
-const charBytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+func makeCheckOrigin(allowed string) func(r *http.Request) bool {
+	if allowed == "" {
+		slog.Warn("no allowlist set")
+		return func(r *http.Request) bool {
+			return true
+		}
+	}
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		return origin == "" || origin == allowed
+	}
+}
 
 /*
 Hub manages all game controllers and lifecycles of games.
 It handles creation of games and mapping of game IDs to their respective GameController instances.
 */
 type Hub struct {
-	mutex sync.RWMutex
-	ctx   context.Context
-	games map[string]*GameController
+	mutex    sync.RWMutex
+	ctx      context.Context
+	games    map[string]*GameController
+	upgrader websocket.Upgrader
 }
 
 /*
 Creates a new Hub instance with the provided context.
 */
-func NewHub(ctx context.Context) *Hub {
+func NewHub(ctx context.Context, allowedOrigin string) *Hub {
+
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     makeCheckOrigin(allowedOrigin),
+	}
+
 	return &Hub{
-		ctx:   ctx,
-		games: make(map[string]*GameController),
+		ctx:      ctx,
+		games:    make(map[string]*GameController),
+		upgrader: upgrader,
 	}
 }
 
@@ -37,39 +60,55 @@ func NewHub(ctx context.Context) *Hub {
 Creates a new game managed by the Hub.
 It expects a JSON payload with the game ID and password for the game as well as the player's name.
 If the game ID is unique, a GameController instance is created and the associated goroutine is started.
-If the player's name is unique, the player is added to the game.
 On success, returns the player's token
 */
-func (hub *Hub) CreateGame(c *gin.Context) {
+func (h *Hub) CreateGame(c *gin.Context) {
 
-	var req models.GameRequest
+	// TODO: cap number of games
+
+	var req models.CreateGameRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if len(req.Password) > 72 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at most 72 bytes"})
+		return
+	}
 
-	hub.mutex.Lock()
-	defer hub.mutex.Unlock()
+	passwordHash, err := HashPassword(req.Password)
+	if err != nil {
+		slog.Error("error while hashing password", "game_id", req.ID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unexpected error while hashing password"})
+		return
+	}
 
-	if _, exists := hub.games[req.ID]; exists {
+	// Holding the lock until end of function
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	if _, exists := h.games[req.ID]; exists {
+		slog.Debug("duplicate game detected", "game_id", req.ID)
 		c.JSON(http.StatusConflict, gin.H{"error": "Game with this ID already exists"})
 		return
 	}
 
-	gameCtx, cancel := context.WithCancel(hub.ctx)
-	gameController, err := CreateGameController(req.ID, req.Password, cancel)
+	gameCtx, cancel := context.WithCancel(h.ctx)
+	gameController, err := CreateGameController(req.ID, passwordHash, req.MaxPlayers, cancel)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		cancel()
+		slog.Error("failed to create gamecontroller", "game_id", req.ID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initialize game server"})
 		return
 	}
+	h.games[req.ID] = gameController
 
-	hub.games[req.ID] = gameController
-
-	go gameController.Run(gameCtx)
+	go gameController.Run(gameCtx, h.removeGameCallback)
 
 	token, err := gameController.JoinGame(req.PlayerName)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		cancel()
+		respondJoinError(c, err)
 		return
 	}
 
@@ -82,35 +121,38 @@ It expects a JSON payload with the game ID and password for the game as well as 
 If the player's ID is unique and the password correct, the player is added to the game.
 On success, returns the player's token
 */
-func (hub *Hub) JoinGame(c *gin.Context) {
+func (h *Hub) JoinGame(c *gin.Context) {
 
-	var req models.GameRequest
+	var req models.JoinGameRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if len(req.Password) > 72 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at most 72 bytes"})
+		return
+	}
 
-	hub.mutex.RLock()
-	defer hub.mutex.RUnlock()
+	h.mutex.RLock()
+	gameController, exists := h.games[req.ID]
+	h.mutex.RUnlock()
 
-	gameController, exists := hub.games[req.ID]
 	if !exists {
+		slog.Debug("game not found")
 		c.JSON(http.StatusNotFound, gin.H{"error": "Game not found"})
 		return
 	}
 
 	passwordValid := gameController.VerifyPassword(req.Password)
 	if !passwordValid {
+		slog.Debug("invalid password")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
 		return
 	}
 
 	token, err := gameController.JoinGame(req.PlayerName)
-	if err == errors.ErrPlayerNameTaken {
-		c.JSON(http.StatusConflict, gin.H{"error": "Name Already Taken"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if err != nil {
+		respondJoinError(c, err)
 		return
 	}
 
@@ -118,16 +160,54 @@ func (hub *Hub) JoinGame(c *gin.Context) {
 
 }
 
-func (hub *Hub) Connect(c *gin.Context) {
+func respondJoinError(c *gin.Context, err error) {
+	switch {
+
+	case errors.Is(err, apperrors.ErrPlayerNameTaken):
+		slog.Debug("duplicate name detected")
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+
+	case errors.Is(err, apperrors.ErrGameFull):
+		slog.Debug("game full")
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+
+	case errors.Is(err, apperrors.ErrGameClosed):
+		slog.Debug("game closed")
+		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
+
+	default:
+		slog.Error("error on player join", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "an unexpected error occurred"})
+	}
+}
+
+func (h *Hub) Connect(c *gin.Context) {
 
 	gameID := c.Param("id")
 
-	gameController, exists := hub.games[gameID]
+	h.mutex.RLock()
+	gameController, exists := h.games[gameID]
+	h.mutex.RUnlock()
+
 	if !exists {
+		slog.Debug("game not found", "game_id", gameID)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Game ID not found"})
 		return
 	}
 
-	gameController.Connect(c)
+	gameController.Connect(c, &h.upgrader)
 
+}
+
+/*
+Callback function that the Run() goroutine calls upon exit, effectively removing itself from the map
+This function locks the mutex, don't use when already holding the lock
+*/
+func (h *Hub) removeGameCallback(id string, gc *GameController) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	if h.games[id] == gc {
+		delete(h.games, id)
+	}
 }

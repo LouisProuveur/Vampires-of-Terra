@@ -1,15 +1,16 @@
+// src/models/player.go
 package models
 
 type Player struct {
-	name      string
-	host      bool
-	connected bool
+	Name      string
+	Host      bool
+	Connected bool
 }
 
-func NewPlayer(name string) Player {
-	return Player{name: name, host: false, connected: false}
+func NewPlayer(name string) *Player {
+	return &Player{Name: name, Host: false, Connected: false}
 }
 
-func HostPlayer(name string) Player {
-	return Player{name: name, host: true, connected: false}
+func HostPlayer(name string) *Player {
+	return &Player{Name: name, Host: true, Connected: false}
 }
