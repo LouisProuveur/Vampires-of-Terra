@@ -6,13 +6,12 @@ import "encoding/json"
 type EventType int
 
 const (
-	Unknown EventType = iota
-	ErrorMessage
+	ErrorMessage EventType = iota
 	PrivateMessage
 	BroadcastMessage
 )
 
-type IncomingEvent struct {
+type ChannelEvent struct {
 	Type    EventType       `json:"type"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
@@ -23,10 +22,14 @@ type Event struct {
 	Payload  json.RawMessage
 }
 
-func (ie *IncomingEvent) ToEvent(playerName string) *Event {
+func (ie *ChannelEvent) ToEvent(playerName string) *Event {
 	return &Event{
 		Type:     ie.Type,
 		PlayerID: playerName,
 		Payload:  ie.Payload,
 	}
+}
+
+func (ie *ChannelEvent) ToJSON() ([]byte, error) {
+	return json.Marshal(ie)
 }

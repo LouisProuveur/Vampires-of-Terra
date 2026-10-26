@@ -217,7 +217,7 @@ func (gc *GameController) Unregister(client *Client) {
 	}
 }
 
-func (gc *GameController) QueueEvent(ev models.IncomingEvent, playerName string) {
+func (gc *GameController) QueueEvent(ev models.ChannelEvent, playerName string) {
 	select {
 	case gc.incomingEvents <- *ev.ToEvent(playerName):
 	case <-gc.done:
@@ -286,5 +286,60 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 }
 
 func (gc *GameController) HandleEvent(event models.Event) {
-	// TODO: validate events and pass them to the game state machine
+
+	cevent := models.ChannelEvent{
+		Type:    event.Type,
+		Payload: event.Payload,
+	}
+
+	switch ev_type := event.Type; ev_type {
+	case models.BroadcastMessage:
+		gc.sendToAll(cevent)
+	default:
+		slog.Warn("unknown event type", "game_id", gc.id, "player_id", event.PlayerID, "event_type", ev_type)
+	}
+}
+
+/*
+sends a channel event to all connected clients
+*/
+func (gc *GameController) sendToAll(cevent models.ChannelEvent) {
+
+	data, err := cevent.ToJSON()
+	if err != nil {
+		slog.Error("failed to serialize event", "game_id", gc.id, "error", err)
+		return
+	}
+
+	for _, c := range gc.clients {
+		select {
+		case c.send <- data:
+		default:
+			slog.Warn("client send buffer full, dropping message", "player_id", c.playerID, "game_id", gc.id)
+		}
+	}
+}
+
+/*
+sends a channel event to the client with a given player ID
+*/
+func (gc *GameController) sendToPlayer(playerID string, cevent models.ChannelEvent) {
+
+	client, exists := gc.clients[playerID]
+	if !exists {
+		slog.Warn("sending message to non-existent client", "player_id", playerID, "game_id", gc.id)
+		return
+	}
+
+	data, err := cevent.ToJSON()
+	if err != nil {
+		slog.Error("failed to serialize event", "game_id", gc.id, "error", err)
+		return
+	}
+
+	select {
+	case client.send <- data:
+	default:
+		slog.Warn("client send buffer full, dropping message", "player_id", client.playerID, "game_id", gc.id)
+	}
 }

@@ -84,5 +84,6 @@ func main() {
 	<-done
 }
 
+// TODO: improve debug logging (game goroutine lifecycle, client goroutine lifecycle, etc.)
 // TODO: better validator messages, rather than dump err.Error()
 // TODO: use env variables when possible rather const when necessary

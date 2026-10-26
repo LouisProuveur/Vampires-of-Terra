@@ -54,7 +54,7 @@ func (c *Client) readPump() {
 			slog.Debug("error when reading client message", "player_id", c.playerID, "game_id", c.game.id, "error", err)
 			return
 		}
-		var event models.IncomingEvent
+		var event models.ChannelEvent
 		if err := json.Unmarshal(message, &event); err != nil {
 			slog.Debug("error when parsing incoming event", "player_id", c.playerID, "game_id", c.game.id, "error", err)
 			// TODO: send error event to client
