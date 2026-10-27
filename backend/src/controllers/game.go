@@ -6,6 +6,7 @@ import (
 	"Vampires-of-Terra/models"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"log/slog"
 	"runtime/debug"
 	"time"
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	GameIdleTimeout = 5 * time.Minute
+	GameIdleTimeout = 1 * time.Minute
 	GracePeriod     = 30 * time.Second
 )
 
@@ -40,7 +41,7 @@ type GameController struct {
 	cancel         context.CancelFunc
 	clients        map[string]*Client // maps player IDs to clients
 	playerJoin     chan *playerJoinRequest
-	incomingEvents chan models.Event
+	incomingEvents chan *models.Event
 	register       chan *Client
 	unregister     chan *Client
 	done           chan struct{}
@@ -65,7 +66,7 @@ func CreateGameController(id string, passwordHash []byte, maxPlayers int, cancel
 		secret:         secret,
 		cancel:         cancel,
 		clients:        make(map[string]*Client),
-		incomingEvents: make(chan models.Event),
+		incomingEvents: make(chan *models.Event),
 		playerJoin:     make(chan *playerJoinRequest),
 		register:       make(chan *Client),
 		unregister:     make(chan *Client),
@@ -195,6 +196,7 @@ func (gc *GameController) Connect(c *gin.Context, upgrader *websocket.Upgrader) 
 		return
 	}
 
+	slog.Debug("new client was created", "player_id", id)
 	client := NewClient(id, gc, conn)
 	gc.Register(client)
 
@@ -217,9 +219,19 @@ func (gc *GameController) Unregister(client *Client) {
 	}
 }
 
-func (gc *GameController) QueueEvent(ev models.ChannelEvent, playerName string) {
+func (gc *GameController) QueueEvent(ev *models.ChannelEvent, playerName string) {
+	event, err := ev.ToEvent(playerName)
+	if err != nil {
+		slog.Error("failed to convert channel event to event", "game_id", gc.id, "player_id", playerName, "error", err)
+		gc.sendToPlayer(playerName, &models.ChannelEvent{
+			Type:    models.ErrorMessage,
+			Payload: json.RawMessage(`{"message":"failed to process event"}`),
+		})
+		return
+	}
+
 	select {
-	case gc.incomingEvents <- *ev.ToEvent(playerName):
+	case gc.incomingEvents <- event:
 	case <-gc.done:
 	}
 }
@@ -229,6 +241,7 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 		if r := recover(); r != nil {
 			slog.Error("event loop crashed", "type", "game_loop_crash", "game_id", gc.id, "panic", r, "stack", debug.Stack())
 		}
+		slog.Debug("game has been closed", "game_id", gc.id)
 	}()
 	defer callback(gc.id, gc)
 	defer close(gc.done)
@@ -240,15 +253,19 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 	}()
 	defer gc.cancel()
 
+	slog.Debug("game loop has been started", "game_id", gc.id)
+
 	// TODO: implement resync
 	timer := time.NewTimer(GameIdleTimeout)
 	grace := false
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Debug("game has been closed", "game_id", gc.id)
 			return
 		case p := <-gc.playerJoin:
 			p.result <- gc.game.AddPlayer(p.playerName)
+			slog.Debug("player added to the game", "game_id", gc.id, "player_id", p.playerName)
 		case c := <-gc.register:
 			if old, exists := gc.clients[c.playerID]; exists {
 				close(old.send)
@@ -257,6 +274,7 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 			if player := gc.game.GetPlayer(c.playerID); player != nil {
 				player.Connected = true
 			}
+			slog.Debug("player connected to the game", "game_id", gc.id, "player_id", c.playerID)
 		case c := <-gc.unregister:
 			if gc.clients[c.playerID] == c {
 				delete(gc.clients, c.playerID)
@@ -265,6 +283,7 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 					player.Connected = false
 				}
 			}
+			slog.Debug("player disconnected from the game", "game_id", gc.id, "player_id", c.playerID)
 			continue // Leaving does not reset grace or timer
 		case e := <-gc.incomingEvents:
 			gc.HandleEvent(e)
@@ -277,6 +296,7 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 				grace = true
 				timer.Reset(GracePeriod)
 				// warn clients that game is about to close
+				slog.Debug("game is idle, entering grace period", "game_id", gc.id)
 				continue
 			}
 		}
@@ -285,25 +305,47 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 	}
 }
 
-func (gc *GameController) HandleEvent(event models.Event) {
-
-	cevent := models.ChannelEvent{
-		Type:    event.Type,
-		Payload: event.Payload,
-	}
+func (gc *GameController) HandleEvent(event *models.Event) {
 
 	switch ev_type := event.Type; ev_type {
+
 	case models.BroadcastMessage:
+
+		payload := event.Payload.(*models.BroadcastMessagePayload)
+		// make sure "from" field is set to correct value
+		payload.From = event.PlayerID
+
+		cevent, err := event.ToChannelEvent()
+		if err != nil {
+			slog.Error("failed to convert event to channel event", "game_id", gc.id, "player_id", event.PlayerID, "error", err)
+			return
+		}
+
 		gc.sendToAll(cevent)
+
+	case models.PrivateMessage:
+
+		payload := event.Payload.(*models.PrivateMessagePayload)
+
+		cevent, err := event.ToChannelEvent()
+		if err != nil {
+			slog.Error("failed to convert event to channel event", "game_id", gc.id, "player_id", event.PlayerID, "error", err)
+			return
+		}
+
+		gc.sendToPlayer(payload.To, cevent)
+
 	default:
+		// TODO: send all other events to game state machine
 		slog.Warn("unknown event type", "game_id", gc.id, "player_id", event.PlayerID, "event_type", ev_type)
+
 	}
 }
 
 /*
 sends a channel event to all connected clients
 */
-func (gc *GameController) sendToAll(cevent models.ChannelEvent) {
+func (gc *GameController) sendToAll(cevent *models.ChannelEvent) {
 
 	data, err := cevent.ToJSON()
 	if err != nil {
@@ -323,11 +365,11 @@ func (gc *GameController) sendToAll(cevent models.ChannelEvent) {
 /*
 sends a channel event to the client with a given player ID
 */
-func (gc *GameController) sendToPlayer(playerID string, cevent models.ChannelEvent) {
+func (gc *GameController) sendToPlayer(playerID string, cevent *models.ChannelEvent) {
 
 	client, exists := gc.clients[playerID]
 	if !exists {
-		slog.Warn("sending message to non-existent client", "player_id", playerID, "game_id", gc.id)
+		slog.Debug("sending message to non-existent client", "player_id", playerID, "game_id", gc.id)
 		return
 	}
 

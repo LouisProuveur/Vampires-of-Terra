@@ -54,10 +54,9 @@ func (c *Client) readPump() {
 			slog.Debug("error when reading client message", "player_id", c.playerID, "game_id", c.game.id, "error", err)
 			return
 		}
-		var event models.ChannelEvent
-		if err := json.Unmarshal(message, &event); err != nil {
+		event := &models.ChannelEvent{}
+		if err := json.Unmarshal(message, event); err != nil {
 			slog.Debug("error when parsing incoming event", "player_id", c.playerID, "game_id", c.game.id, "error", err)
-			// TODO: send error event to client
 			continue
 		}
 
@@ -70,6 +69,7 @@ func (c *Client) writePump() {
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
+		slog.Debug("client connection closed", "player_id", c.playerID, "game_id", c.game.id)
 	}()
 
 	for {
