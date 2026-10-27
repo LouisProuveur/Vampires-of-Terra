@@ -6,7 +6,6 @@ import (
 	"Vampires-of-Terra/models"
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"log/slog"
 	"runtime/debug"
 	"time"
@@ -23,14 +22,14 @@ const (
 )
 
 type playerClaims struct {
-	PlayerName string `json:"pid"`
-	GameID     string `json:"gid"`
+	PlayerID string `json:"pid"`
+	GameID   string `json:"gid"`
 	jwt.RegisteredClaims
 }
 
 type playerJoinRequest struct {
-	playerName string
-	result     chan error
+	playerID string
+	result   chan error
 }
 
 type GameController struct {
@@ -93,10 +92,10 @@ func (gc *GameController) VerifyPassword(password string) bool {
 Produces a JWT holding the player's name and associated game ID.
 These tokens are only valid for the game they were created for.
 */
-func (gc *GameController) signToken(playerName string) (string, error) {
+func (gc *GameController) signToken(playerID string) (string, error) {
 	claims := playerClaims{
-		PlayerName: playerName,
-		GameID:     gc.id,
+		PlayerID: playerID,
+		GameID:   gc.id,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
@@ -128,23 +127,23 @@ func (gc *GameController) parseToken(tokenStr string) (string, error) {
 		return "", jwt.ErrTokenInvalidClaims
 	}
 
-	return claims.PlayerName, nil
+	return claims.PlayerID, nil
 }
 
 /*
 Registers a player into the game.
 Returns the player's token
 */
-func (gc *GameController) JoinGame(playerName string) (string, error) {
+func (gc *GameController) JoinGame(playerID string) (string, error) {
 
-	token, err := gc.signToken(playerName)
+	token, err := gc.signToken(playerID)
 	if err != nil {
 		return "", err
 	}
 
 	req := &playerJoinRequest{
-		playerName: playerName,
-		result:     make(chan error, 1),
+		playerID: playerID,
+		result:   make(chan error, 1),
 	}
 
 	select {
@@ -170,7 +169,7 @@ func (gc *GameController) Connect(c *gin.Context, upgrader *websocket.Upgrader) 
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		slog.Error("websocker error failed", "game_id", gc.id, "error", err)
+		slog.Error("websocket error", "game_id", gc.id, "error", err)
 		return
 	}
 
@@ -179,7 +178,7 @@ func (gc *GameController) Connect(c *gin.Context, upgrader *websocket.Upgrader) 
 	conn.SetReadLimit(512)
 	_, message, err := conn.ReadMessage()
 	if err != nil {
-		slog.Warn("client authenication failed", "ip", conn.RemoteAddr(), "error", err)
+		slog.Warn("client authentication failed", "ip", c.ClientIP(), "error", err)
 		conn.Close()
 		return
 	}
@@ -219,15 +218,10 @@ func (gc *GameController) Unregister(client *Client) {
 	}
 }
 
-func (gc *GameController) QueueEvent(ev *models.ChannelEvent, playerName string) {
-	event, err := ev.ToEvent(playerName)
+func (gc *GameController) QueueEvent(ev *models.ChannelEvent, playerID string) {
+	event, err := ev.ToEvent(playerID)
 	if err != nil {
-		slog.Error("failed to convert channel event to event", "game_id", gc.id, "player_id", playerName, "error", err)
-		gc.sendToPlayer(playerName, &models.ChannelEvent{
-			Type:    models.ErrorMessage,
-			Payload: json.RawMessage(`{"message":"failed to process event"}`),
-		})
-		return
+		slog.Debug("failed to convert channel event to event", "game_id", gc.id, "player_id", playerID, "error", err)
 	}
 
 	select {
@@ -239,7 +233,7 @@ func (gc *GameController) QueueEvent(ev *models.ChannelEvent, playerName string)
 func (gc *GameController) Run(ctx context.Context, callback func(string, *GameController)) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("event loop crashed", "type", "game_loop_crash", "game_id", gc.id, "panic", r, "stack", debug.Stack())
+			slog.Error("event loop crashed", "type", "game_loop_crash", "game_id", gc.id, "panic", r, "stack", string(debug.Stack()))
 		}
 		slog.Debug("game has been closed", "game_id", gc.id)
 	}()
@@ -261,11 +255,10 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Debug("game has been closed", "game_id", gc.id)
 			return
 		case p := <-gc.playerJoin:
-			p.result <- gc.game.AddPlayer(p.playerName)
-			slog.Debug("player added to the game", "game_id", gc.id, "player_id", p.playerName)
+			p.result <- gc.game.AddPlayer(p.playerID)
+			slog.Debug("player added to the game", "game_id", gc.id, "player_id", p.playerID)
 		case c := <-gc.register:
 			if old, exists := gc.clients[c.playerID]; exists {
 				close(old.send)
@@ -288,14 +281,25 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 		case e := <-gc.incomingEvents:
 			gc.HandleEvent(e)
 
-		// If noone is connected or grace period is over, return. Else, warn clients and enter grace period
+		// If no one is connected or grace period is over, return. Else, warn clients and enter grace period
 		case <-timer.C:
 			if grace || len(gc.clients) == 0 {
 				return
 			} else {
 				grace = true
 				timer.Reset(GracePeriod)
-				// warn clients that game is about to close
+				event := &models.Event{
+					Type: models.BroadcastMessage,
+					Payload: &models.BroadcastMessagePayload{
+						From:    "server",
+						Message: "Game is idle, will be closed in 30 seconds if no one reconnects",
+					},
+				}
+				if cevent, err := event.ToChannelEvent(); err == nil {
+					gc.sendToAll(cevent)
+				} else {
+					slog.Error("failed to write grace warning to clients", "game_id", gc.id, "error", err)
+				}
 				slog.Debug("game is idle, entering grace period", "game_id", gc.id)
 				continue
 			}
@@ -307,12 +311,16 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 
 func (gc *GameController) HandleEvent(event *models.Event) {
 
-	switch ev_type := event.Type; ev_type {
+	switch evType := event.Type; evType {
 
 	case models.BroadcastMessage:
 
-		payload := event.Payload.(*models.BroadcastMessagePayload)
-		// make sure "from" field is set to correct value
+		payload, ok := event.Payload.(*models.BroadcastMessagePayload)
+		if !ok {
+			slog.Error("invalid payload type for broadcast message", "game_id", gc.id, "player_id", event.PlayerID)
+			return
+		}
+		// make sure "from" field is not spooded by client
 		payload.From = event.PlayerID
 
 		cevent, err := event.ToChannelEvent()
@@ -325,7 +333,13 @@ func (gc *GameController) HandleEvent(event *models.Event) {
 
 	case models.PrivateMessage:
 
-		payload := event.Payload.(*models.PrivateMessagePayload)
+		payload, ok := event.Payload.(*models.PrivateMessagePayload)
+		if !ok {
+			slog.Error("invalid payload type for private message", "game_id", gc.id, "player_id", event.PlayerID)
+			return
+		}
+		// make sure "from" field is not spoofed by client
+		payload.From = event.PlayerID
 
 		cevent, err := event.ToChannelEvent()
 		if err != nil {
@@ -337,7 +351,7 @@ func (gc *GameController) HandleEvent(event *models.Event) {
 
 	default:
 		// TODO: send all other events to game state machine
-		slog.Warn("unknown event type", "game_id", gc.id, "player_id", event.PlayerID, "event_type", ev_type)
+		slog.Warn("unknown event type", "game_id", gc.id, "player_id", event.PlayerID, "event_type", evType)
 
 	}
 }

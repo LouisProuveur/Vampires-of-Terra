@@ -1,3 +1,4 @@
+// src/main.go
 package main
 
 import (
@@ -42,12 +43,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	hub := controllers.NewHub(ctx, os.Getenv("FRONTEND_URL"))
-
 	if err := models.RegisterValidators(); err != nil {
 		slog.Error("validator loading failed", "error", err)
 		os.Exit(1)
 	}
+
+	hub := controllers.NewHub(ctx, os.Getenv("FRONTEND_URL"))
 
 	router := routes.SetupRouter(hub)
 
@@ -58,10 +59,15 @@ func main() {
 
 	backendAddr := ":" + backendPort
 	// Create and start the server with graceful shutdown
-	srv := &http.Server{Addr: backendAddr, Handler: router}
-	srv.ReadHeaderTimeout = 5 * time.Second
-	srv.ReadTimeout = 10 * time.Second
-	srv.IdleTimeout = 60 * time.Second
+	srv := &http.Server{
+		Addr:              backendAddr,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	done := make(chan struct{})
 
@@ -86,3 +92,5 @@ func main() {
 
 // TODO: better validator messages, rather than dump err.Error()
 // TODO: use env variables when possible rather const when necessary
+// TODO: document the code, and modify existing doc comments to match Go convention (especially exported methods)
+// TODO: change filepath comments

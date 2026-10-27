@@ -1,4 +1,4 @@
-// models/validators.go
+// src/models/validators.go
 package models
 
 import (
@@ -16,10 +16,21 @@ func RegisterValidators() error {
 	if !ok {
 		return errors.New("unexpected validator engine")
 	}
-	if err := v.RegisterValidation("playername", func(fl validator.FieldLevel) bool {
+
+	// Player ID validator
+	if err := v.RegisterValidation("playerID", func(fl validator.FieldLevel) bool {
 		return nameRe.MatchString(fl.Field().String())
 	}); err != nil {
 		return err
 	}
+
+	// Game Password Validator
+	if err := v.RegisterValidation("gamePasswordLength", func(fl validator.FieldLevel) bool {
+		length := len(fl.Field().String())
+		return length >= 1 && length <= 72
+	}); err != nil {
+		return err
+	}
+
 	return nil
 }

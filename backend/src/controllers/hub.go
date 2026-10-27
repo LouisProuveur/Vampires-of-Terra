@@ -71,25 +71,11 @@ func (h *Hub) CreateGame(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if len(req.Password) > 72 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at most 72 bytes"})
-		return
-	}
 
 	passwordHash, err := HashPassword(req.Password)
 	if err != nil {
 		slog.Error("error while hashing password", "game_id", req.ID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unexpected error while hashing password"})
-		return
-	}
-
-	// Holding the lock until end of function
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-
-	if _, exists := h.games[req.ID]; exists {
-		slog.Debug("duplicate game detected", "game_id", req.ID)
-		c.JSON(http.StatusConflict, gin.H{"error": "Game with this ID already exists"})
 		return
 	}
 
@@ -101,11 +87,28 @@ func (h *Hub) CreateGame(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initialize game server"})
 		return
 	}
+
+	locked := true
+	h.mutex.Lock()
+	defer func() {
+		if locked {
+			h.mutex.Unlock()
+		}
+	}()
+
+	if _, exists := h.games[req.ID]; exists {
+		slog.Debug("duplicate game detected", "game_id", req.ID)
+		c.JSON(http.StatusConflict, gin.H{"error": "Game with this ID already exists"})
+		return
+	}
 	h.games[req.ID] = gameController
+
+	h.mutex.Unlock()
+	locked = false
 
 	go gameController.Run(gameCtx, h.removeGameCallback)
 
-	token, err := gameController.JoinGame(req.PlayerName)
+	token, err := gameController.JoinGame(req.PlayerID)
 	if err != nil {
 		cancel()
 		respondJoinError(c, err)
@@ -150,7 +153,7 @@ func (h *Hub) JoinGame(c *gin.Context) {
 		return
 	}
 
-	token, err := gameController.JoinGame(req.PlayerName)
+	token, err := gameController.JoinGame(req.PlayerID)
 	if err != nil {
 		respondJoinError(c, err)
 		return

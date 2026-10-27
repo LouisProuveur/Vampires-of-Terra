@@ -22,14 +22,14 @@ func NewGame(maxPlayers int) *Game {
 
 /*
 Adds a player to the game.
-Produces an error if the name is already taken.
+Produces an error if the ID is already taken.
 */
-func (g *Game) AddPlayer(playerName string) error {
+func (g *Game) AddPlayer(playerID string) error {
 
 	length := len(g.players)
 
 	if length == 0 {
-		g.players[playerName] = HostPlayer(playerName)
+		g.players[playerID] = HostPlayer(playerID)
 		return nil
 	}
 
@@ -37,18 +37,18 @@ func (g *Game) AddPlayer(playerName string) error {
 		return apperrors.ErrGameFull
 	}
 
-	if _, exists := g.players[playerName]; !exists {
-		g.players[playerName] = NewPlayer(playerName)
-	} else {
+	if _, exists := g.players[playerID]; exists {
 		return apperrors.ErrPlayerNameTaken
 	}
+
+	g.players[playerID] = NewPlayer(playerID)
 
 	return nil
 
 }
 
-func (g *Game) GetPlayer(playerName string) *Player {
-	return g.players[playerName]
+func (g *Game) GetPlayer(playerID string) *Player {
+	return g.players[playerID]
 }
 
 // TODO: add game JSON formatting to allow resync

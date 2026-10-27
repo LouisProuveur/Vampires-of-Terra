@@ -3,10 +3,15 @@ package models
 
 import "encoding/json"
 
+/*
+TODO: use an event interface with Event.(type) rather than relying on an Type field and assertion checks
+This will also make payload management easier since a payload and event types are currently not bound together
+*/
+
 type EventType int
 
 const (
-	ErrorMessage EventType = iota
+	Unknown EventType = iota
 	PrivateMessage
 	BroadcastMessage
 )
@@ -16,14 +21,14 @@ type ChannelEvent struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-func (ce *ChannelEvent) ToEvent(playerName string) (*Event, error) {
+func (ce *ChannelEvent) ToEvent(playerID string) (*Event, error) {
 	payload, err := NewPayload(ce.Type, ce.Payload)
 	if err != nil {
 		return nil, err
 	}
 	return &Event{
 		Type:     ce.Type,
-		PlayerID: playerName,
+		PlayerID: playerID,
 		Payload:  payload,
 	}, nil
 }
