@@ -77,7 +77,8 @@ func CreateGameController(id string, passwordHash []byte, maxPlayers int, cancel
 Hashes a password in a way that is expected by the game controller.
 */
 func HashPassword(password string) ([]byte, error) {
-	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	// Using MinCost since password only lives for game duration and in memory. If ever becomes persistent, consider using higher cost.
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
 }
 
 /*
