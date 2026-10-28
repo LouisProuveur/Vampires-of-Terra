@@ -7,37 +7,31 @@ import "encoding/json"
 
 type Payload interface {
 	isPayload()
+	FromJSON(json.RawMessage) error
 	ToJSON() ([]byte, error)
-}
-
-func NewPayload(etype EventType, msg json.RawMessage) (Payload, error) {
-	var payload Payload
-	switch etype {
-	case PrivateMessage:
-		payload = &PrivateMessagePayload{}
-	case BroadcastMessage:
-		payload = &BroadcastMessagePayload{}
-	default:
-		return nil, nil
-	}
-	if err := json.Unmarshal(msg, payload); err != nil {
-		return nil, err
-	}
-	return payload, nil
+	EventType() EventType
 }
 
 // ---- Payload for PrivateMessage Event ----
 
 type PrivateMessagePayload struct {
-	To      string `json:"to"`
-	From    string `json:"from,omitempty"`
-	Message string `json:"message"`
+	To      []string `json:"to"`
+	From    string   `json:"from,omitempty"`
+	Message string   `json:"message"`
 }
 
-func (_ *PrivateMessagePayload) isPayload() {}
+func (*PrivateMessagePayload) isPayload() {}
 
 func (pmp *PrivateMessagePayload) ToJSON() ([]byte, error) {
 	return json.Marshal(pmp)
+}
+
+func (pmp *PrivateMessagePayload) FromJSON(data json.RawMessage) error {
+	return json.Unmarshal(data, pmp)
+}
+
+func (*PrivateMessagePayload) EventType() EventType {
+	return PrivateMessage
 }
 
 // ---- Payload for BroadcastMessage Event ----
@@ -47,8 +41,16 @@ type BroadcastMessagePayload struct {
 	Message string `json:"message"`
 }
 
-func (_ *BroadcastMessagePayload) isPayload() {}
+func (*BroadcastMessagePayload) isPayload() {}
 
 func (bmp *BroadcastMessagePayload) ToJSON() ([]byte, error) {
 	return json.Marshal(bmp)
+}
+
+func (bmp *BroadcastMessagePayload) FromJSON(data json.RawMessage) error {
+	return json.Unmarshal(data, bmp)
+}
+
+func (*BroadcastMessagePayload) EventType() EventType {
+	return BroadcastMessage
 }

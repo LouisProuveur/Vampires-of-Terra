@@ -40,7 +40,7 @@ type GameController struct {
 	cancel         context.CancelFunc
 	clients        map[string]*Client // maps player IDs to clients
 	playerJoin     chan *playerJoinRequest
-	incomingEvents chan *models.Event
+	incomingEvents chan models.Event
 	register       chan *Client
 	unregister     chan *Client
 	done           chan struct{}
@@ -65,7 +65,7 @@ func CreateGameController(id string, passwordHash []byte, maxPlayers int, cancel
 		secret:         secret,
 		cancel:         cancel,
 		clients:        make(map[string]*Client),
-		incomingEvents: make(chan *models.Event),
+		incomingEvents: make(chan models.Event),
 		playerJoin:     make(chan *playerJoinRequest),
 		register:       make(chan *Client),
 		unregister:     make(chan *Client),
@@ -292,13 +292,13 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 			} else {
 				grace = true
 				timer.Reset(GracePeriod)
-				event := &models.Event{
-					Type: models.BroadcastMessage,
-					Payload: &models.BroadcastMessagePayload{
+				event := models.NewEvent(
+					&models.BroadcastMessagePayload{
 						From:    "server",
 						Message: "Game is idle, will be closed in 30 seconds if no one reconnects",
 					},
-				}
+					"server",
+				)
 				if cevent, err := event.ToChannelEvent(); err == nil {
 					gc.sendToAll(cevent)
 				} else {
@@ -313,17 +313,13 @@ func (gc *GameController) Run(ctx context.Context, callback func(string, *GameCo
 	}
 }
 
-func (gc *GameController) HandleEvent(event *models.Event) {
+func (gc *GameController) HandleEvent(event models.Event) {
 
-	switch evType := event.Type; evType {
+	switch event := event.(type) {
 
-	case models.BroadcastMessage:
+	case models.BroadcastMessageEvent:
+		payload := event.Payload
 
-		payload, ok := event.Payload.(*models.BroadcastMessagePayload)
-		if !ok {
-			slog.Error("invalid payload type for broadcast message", "game_id", gc.id, "player_id", event.PlayerID)
-			return
-		}
 		// make sure "from" field is not spooded by client
 		payload.From = event.PlayerID
 
@@ -335,13 +331,10 @@ func (gc *GameController) HandleEvent(event *models.Event) {
 
 		gc.sendToAll(cevent)
 
-	case models.PrivateMessage:
+	case models.PrivateMessageEvent:
 
-		payload, ok := event.Payload.(*models.PrivateMessagePayload)
-		if !ok {
-			slog.Error("invalid payload type for private message", "game_id", gc.id, "player_id", event.PlayerID)
-			return
-		}
+		payload := event.Payload
+
 		// make sure "from" field is not spoofed by client
 		payload.From = event.PlayerID
 
@@ -351,11 +344,11 @@ func (gc *GameController) HandleEvent(event *models.Event) {
 			return
 		}
 
-		gc.sendToPlayer(payload.To, cevent)
+		gc.sendToPlayers(payload.To, cevent)
 
 	default:
 		// TODO: send all other events to game state machine
-		slog.Warn("unknown event type", "game_id", gc.id, "player_id", event.PlayerID, "event_type", evType)
+		slog.Warn("unknown event type", "game_id", gc.id, "event", event)
 
 	}
 }
@@ -383,23 +376,26 @@ func (gc *GameController) sendToAll(cevent *models.ChannelEvent) {
 /*
 sends a channel event to the client with a given player ID
 */
-func (gc *GameController) sendToPlayer(playerID string, cevent *models.ChannelEvent) {
+func (gc *GameController) sendToPlayers(to []string, cevent *models.ChannelEvent) {
 
-	client, exists := gc.clients[playerID]
-	if !exists {
-		slog.Debug("sending message to non-existent client", "player_id", playerID, "game_id", gc.id)
-		return
+	for _, playerID := range to {
+		client, exists := gc.clients[playerID]
+		if !exists {
+			slog.Debug("sending message to non-existent client", "player_id", playerID, "game_id", gc.id)
+			return
+		}
+
+		data, err := cevent.ToJSON()
+		if err != nil {
+			slog.Error("failed to serialize event", "game_id", gc.id, "error", err)
+			return
+		}
+
+		select {
+		case client.send <- data:
+		default:
+			slog.Warn("client send buffer full, dropping message", "player_id", client.playerID, "game_id", gc.id)
+		}
 	}
 
-	data, err := cevent.ToJSON()
-	if err != nil {
-		slog.Error("failed to serialize event", "game_id", gc.id, "error", err)
-		return
-	}
-
-	select {
-	case client.send <- data:
-	default:
-		slog.Warn("client send buffer full, dropping message", "player_id", client.playerID, "game_id", gc.id)
-	}
 }

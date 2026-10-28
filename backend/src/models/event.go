@@ -1,12 +1,10 @@
 // src/models/event.go
 package models
 
-import "encoding/json"
-
-/*
-TODO: use an event interface with Event.(type) rather than relying on an Type field and assertion checks
-This will also make payload management easier since a payload and event types are currently not bound together
-*/
+import (
+	"Vampires-of-Terra/apperrors"
+	"encoding/json"
+)
 
 type EventType int
 
@@ -21,35 +19,61 @@ type ChannelEvent struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-func (ce *ChannelEvent) ToEvent(playerID string) (*Event, error) {
-	payload, err := NewPayload(ce.Type, ce.Payload)
-	if err != nil {
-		return nil, err
-	}
-	return &Event{
-		Type:     ce.Type,
-		PlayerID: playerID,
-		Payload:  payload,
-	}, nil
-}
-
 func (ce *ChannelEvent) ToJSON() ([]byte, error) {
 	return json.Marshal(ce)
 }
 
-type Event struct {
-	Type     EventType
-	PlayerID string
-	Payload  Payload
+func (ce *ChannelEvent) toEvent[P Payload](payload P, playerID string) (Event, error) {
+	if err := payload.FromJSON(ce.Payload); err != nil {
+		return nil, err
+	}
+	return NewEvent(payload, playerID), nil
 }
 
-func (e *Event) ToChannelEvent() (*ChannelEvent, error) {
+func (ce *ChannelEvent) ToEvent(playerID string) (Event, error) {
+
+	switch ce.Type {
+	case PrivateMessage:
+		return ce.toEvent(&PrivateMessagePayload{}, playerID)
+	case BroadcastMessage:
+		return ce.toEvent(&BroadcastMessagePayload{}, playerID)
+	default:
+		return nil, apperrors.ErrUnkownPayloadType
+	}
+}
+
+type Event interface {
+	ToChannelEvent() (*ChannelEvent, error)
+	isEvent()
+}
+
+type TypedEvent[P Payload] struct {
+	PlayerID string
+	Payload  P
+}
+
+func NewEvent[P Payload](p P, playerID string) *TypedEvent[P] {
+
+	return &TypedEvent[P]{
+		PlayerID: playerID,
+		Payload:  p,
+	}
+}
+
+func (e *TypedEvent[P]) ToChannelEvent() (*ChannelEvent, error) {
 	payloadJSON, err := e.Payload.ToJSON()
 	if err != nil {
 		return nil, err
 	}
 	return &ChannelEvent{
-		Type:    e.Type,
+		Type:    e.Payload.EventType(),
 		Payload: payloadJSON,
 	}, nil
 }
+
+func (e *TypedEvent[P]) isEvent() {}
+
+type (
+	PrivateMessageEvent   = *TypedEvent[*PrivateMessagePayload]
+	BroadcastMessageEvent = *TypedEvent[*BroadcastMessagePayload]
+)

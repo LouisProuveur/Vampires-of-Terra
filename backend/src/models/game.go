@@ -26,6 +26,10 @@ Produces an error if the ID is already taken.
 */
 func (g *Game) AddPlayer(playerID string) error {
 
+	if _, exists := g.players[playerID]; exists || playerID == "server" {
+		return apperrors.ErrPlayerNameTaken
+	}
+
 	length := len(g.players)
 
 	if length == 0 {
@@ -35,10 +39,6 @@ func (g *Game) AddPlayer(playerID string) error {
 
 	if length >= g.maxPlayers {
 		return apperrors.ErrGameFull
-	}
-
-	if _, exists := g.players[playerID]; exists {
-		return apperrors.ErrPlayerNameTaken
 	}
 
 	g.players[playerID] = NewPlayer(playerID)
