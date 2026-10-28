@@ -173,6 +173,10 @@ func (gc *GameController) Connect(c *gin.Context, upgrader *websocket.Upgrader) 
 		return
 	}
 
+	go gc.authenticateClient(c, conn)
+}
+
+func (gc *GameController) authenticateClient(c *gin.Context, conn *websocket.Conn) {
 	// Wait 5 secs for client to send auth message
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	conn.SetReadLimit(512)
@@ -198,7 +202,6 @@ func (gc *GameController) Connect(c *gin.Context, upgrader *websocket.Upgrader) 
 	slog.Debug("new client was created", "player_id", id)
 	client := NewClient(id, gc, conn)
 	gc.Register(client)
-
 }
 
 func (gc *GameController) Register(client *Client) {
