@@ -1,4 +1,7 @@
 // src/models/validators.go
+
+// Package models defines the data structures for the application.
+// It defines methods and functions to handle the data, and structures for JSON Marshalling and Unmarshalling
 package models
 
 import (
@@ -11,6 +14,7 @@ import (
 
 var nameRe = regexp.MustCompile(`^[\p{Latin}\p{N}_-]+$`)
 
+// RegisterValidators registers all the JSON validators used by the different models
 func RegisterValidators() error {
 	v, ok := binding.Validator.Engine().(*validator.Validate)
 	if !ok {

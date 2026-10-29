@@ -1,4 +1,7 @@
 // src/controllers/client.go
+
+// Package controllers is responsible for managing the interactions between the users and the game itself.
+// It creates game instances, allows to connect users to games and manages transfer of information between the game and the user.
 package controllers
 
 import (
@@ -18,15 +21,15 @@ const (
 	sendBufferSize = 64
 )
 
-type Client struct {
+type client struct {
 	playerID string
 	game     *GameController
 	conn     *websocket.Conn
 	send     chan []byte
 }
 
-func NewClient(id string, gc *GameController, conn *websocket.Conn) *Client {
-	return &Client{
+func newClient(id string, gc *GameController, conn *websocket.Conn) *client {
+	return &client{
 		playerID: id,
 		game:     gc,
 		conn:     conn,
@@ -35,7 +38,7 @@ func NewClient(id string, gc *GameController, conn *websocket.Conn) *Client {
 }
 
 // TODO: event rate limiter
-func (c *Client) readPump() {
+func (c *client) readPump() {
 	defer func() {
 		c.game.Unregister(c)
 		c.conn.Close()
@@ -64,7 +67,7 @@ func (c *Client) readPump() {
 	}
 }
 
-func (c *Client) writePump() {
+func (c *client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()

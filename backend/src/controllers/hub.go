@@ -1,4 +1,7 @@
 // src/controllers/hub.go
+
+// Package controllers is responsible for managing the interactions between the users and the game itself.
+// It creates game instances, allows to connect users to games and manages transfer of information between the game and the user.
 package controllers
 
 import (
@@ -27,10 +30,8 @@ func makeCheckOrigin(allowed string) func(r *http.Request) bool {
 	}
 }
 
-/*
-Hub manages all game controllers and lifecycles of games.
-It handles creation of games and mapping of game IDs to their respective GameController instances.
-*/
+// Hub manages all game controllers and lifecycles of games.
+// It handles creation of games and mapping of game IDs to their respective GameController instances.
 type Hub struct {
 	mutex    sync.RWMutex
 	ctx      context.Context
@@ -38,9 +39,7 @@ type Hub struct {
 	upgrader websocket.Upgrader
 }
 
-/*
-Creates a new Hub instance with the provided context.
-*/
+// NewHub creates a new Hub instance with the provided context.
 func NewHub(ctx context.Context, allowedOrigin string) *Hub {
 
 	upgrader := websocket.Upgrader{
@@ -56,12 +55,10 @@ func NewHub(ctx context.Context, allowedOrigin string) *Hub {
 	}
 }
 
-/*
-Creates a new game managed by the Hub.
-It expects a JSON payload with the game ID and password for the game as well as the player's name.
-If the game ID is unique, a GameController instance is created and the associated goroutine is started.
-On success, returns the player's token
-*/
+// CreateGame creates a new game managed by the Hub.
+// It expects a JSON payload that matches [models.CreateGameRequest].
+// If the game ID is unique, a GameController instance is created and the associated goroutine is started.
+// On success, returns the player's token
 func (h *Hub) CreateGame(c *gin.Context) {
 
 	// TODO: cap number of games
@@ -118,12 +115,10 @@ func (h *Hub) CreateGame(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "Game created", "token": token})
 }
 
-/*
-Used to add a player to a game.
-It expects a JSON payload with the game ID and password for the game as well as the player's name.
-If the player's ID is unique and the password correct, the player is added to the game.
-On success, returns the player's token
-*/
+// JoinGame is used to add a player to a game.
+// It expects a JSON payload that matches [models.JoinGameRequest].
+// If the player's ID is unique and the password correct, the player is added to the game.
+// On success, returns the player's token
 func (h *Hub) JoinGame(c *gin.Context) {
 
 	var req models.JoinGameRequest
@@ -163,6 +158,7 @@ func (h *Hub) JoinGame(c *gin.Context) {
 
 }
 
+// respondJoinError sends a response appropriate to the returned error type
 func respondJoinError(c *gin.Context, err error) {
 	switch {
 
@@ -184,6 +180,7 @@ func respondJoinError(c *gin.Context, err error) {
 	}
 }
 
+// Connect upgrades the underlying connection to a websocket and starts client authentication.
 func (h *Hub) Connect(c *gin.Context) {
 
 	gameID := c.Param("id")
@@ -202,10 +199,8 @@ func (h *Hub) Connect(c *gin.Context) {
 
 }
 
-/*
-Callback function that the Run() goroutine calls upon exit, effectively removing itself from the map
-This function locks the mutex, don't use when already holding the lock
-*/
+// removeGameCallback is a callback function that the Run() goroutine calls upon exit, effectively removing itself from the map
+// This function locks the mutex, don't use when already holding the lock
 func (h *Hub) removeGameCallback(id string, gc *GameController) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
